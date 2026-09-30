@@ -1,0 +1,11 @@
+# Calcul
+numpy>=1.24
+scipy>=1.10
+
+# Visualisation et export
+matplotlib>=3.7
+plotly>=5.15
+ffmpeg-python>=0.2    # nécessite aussi l'exécutable ffmpeg dans le PATH (MP4)
+
+# Tests
+pytest>=7.4
