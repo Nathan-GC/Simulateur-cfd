@@ -45,15 +45,19 @@ from matplotlib.figure import Figure
 
 # Outils d'analyse (champs dérivés, efforts, profils...).
 from .analytics import (
+    ChordwiseDistribution,
     FlowFields,
     ForceHistory,
     ForceSummary,
     Spectrum,
     SurfaceDistribution,
     WakeProfile,
+    chord_line,
+    chordwise_pressure,
     compute_fields,
     divergence_report,
     recirculation_length,
+    reference_pressure,
     surface_pressure,
     vorticity_nodes,
     wake_profiles,
@@ -68,8 +72,8 @@ from .grid import StaggeredGrid
 # Vitesses au centre des cellules (animation de la norme de la vitesse).
 from .operators import cell_centered_velocity
 
-# Solveur.
-from .solver import NavierStokesSolver
+# Solveur et état de l'écoulement (instantanés animés après coup).
+from .solver import FlowState, NavierStokesSolver
 
 # Journal du module.
 logger = logging.getLogger(__name__)
@@ -215,8 +219,20 @@ def field_image(
     view: tuple[float, float, float, float] | None = None,
     colorbar: bool = True,
 ):
-    """Affiche un champ 2D (``kind='vorticity'`` aux coins, ``'speed'`` aux centres) avec les obstacles."""
-    if kind == "vorticity":
+    """Affiche un champ 2D avec les obstacles.
+
+    ``kind`` : ``'vorticity'`` (aux coins, échelle divergente), ``'speed'`` (aux centres,
+    échelle séquentielle) ou ``'pressure'`` (coefficient de pression aux centres, divergente).
+    """
+    if kind == "pressure":
+        # Coefficient de pression aux centres ; valeur neutre (0) dans le solide.
+        data = np.where(solid, 0.0, data)
+        extent = (0.0, grid.Lx, 0.0, grid.Ly)
+        # Échelle divergente symétrique : surpression en rouge, dépression en bleu.
+        vmax = vmax or symmetric_limit(data)
+        norm = {"cmap": DIVERGING, "vmin": -vmax, "vmax": vmax}
+        label = "Cp"
+    elif kind == "vorticity":
         # Vorticité aux coins ; valeur neutre (0, gris) dans le solide : les coins de l'escalier
         # non recouverts par le contour exact de l'obstacle restent ainsi discrets.
         data = np.where(corner_solid(solid), 0.0, data)
@@ -294,14 +310,15 @@ def plot_streamlines(
     return lines
 
 
-def _focus_limits(t: np.ndarray, values: np.ndarray, symmetric: bool = False) -> tuple[float, float]:
+def focus_limits(t: np.ndarray, values: np.ndarray, symmetric: bool = False) -> tuple[float, float]:
     """Bornes verticales ignorant le pic du démarrage impulsif (5 % initiaux du temps)."""
     # Échantillons après les premiers 5 % de la durée.
     keep = t >= t[0] + 0.05 * (t[-1] - t[0])
     selected = values[keep] if keep.sum() > 1 else values
     lo, hi = float(selected.min()), float(selected.max())
-    if symmetric:
-        # Axe symétrique autour de 0 (portance).
+    if symmetric and lo < 0.0 < hi:
+        # Axe symétrique autour de 0 quand le signal change de signe (portance oscillante d'un corps
+        # symétrique) ; une portance de signe constant (profil) garde un cadrage serré.
         bound = max(abs(lo), abs(hi), 1e-6)
         lo, hi = -bound, bound
     # Marge de 10 % (au moins 1e-6 pour un signal constant).
@@ -309,17 +326,29 @@ def _focus_limits(t: np.ndarray, values: np.ndarray, symmetric: bool = False) ->
     return lo - margin, hi + margin
 
 
+# Ancien nom (privé), conservé pour compatibilité.
+_focus_limits = focus_limits
+
+
+def convective_time(history: ForceHistory) -> np.ndarray:
+    """Temps adimensionné ``t U / L`` des séries d'efforts (égal au temps physique si U = L = 1)."""
+    return history.time * history.reference_velocity / history.reference_length
+
+
 def plot_force_history(ax_cd, ax_cl, history: ForceHistory, summary: ForceSummary | None = None) -> None:
     """``Cd(t)`` et ``Cl(t)`` en petits multiples (deux axes superposés, une série chacun)."""
+    # Abscisse : temps convectif t U / L ; facteur de conversion des instants de la fenêtre d'analyse.
+    tau = convective_time(history)
+    scale = history.reference_velocity / history.reference_length
     for ax, values, name, color, symmetric in (
         (ax_cd, history.cd, "Cd", SERIES[0], False),
         (ax_cl, history.cl, "Cl", SERIES[1], True),
     ):
         # Courbe du coefficient.
-        ax.plot(history.time, values, color=color)
+        ax.plot(tau, values, color=color)
         # Fenêtre d'analyse (régime établi) : voile très léger de la couleur de la série.
         if summary is not None:
-            ax.axvspan(summary.t_start, summary.t_end, color=color, alpha=0.08, linewidth=0)
+            ax.axvspan(summary.t_start * scale, summary.t_end * scale, color=color, alpha=0.08, linewidth=0)
         # Nom du coefficient en étiquette verticale (une seule série : pas de légende).
         ax.set_ylabel(name)
         # Cadrage vertical sans le pic de démarrage.
@@ -384,9 +413,40 @@ def plot_cp(ax, cp: SurfaceDistribution | None) -> None:
     ax.set_ylabel("Cp")
 
 
-def plot_wake_profiles(ax, profiles: Sequence[WakeProfile], eta_max: float = 3.0) -> None:
-    """Profils ``u(y)/U∞`` aux stations du sillage (une couleur fixe par station, légende)."""
-    ax.set_title("Profils de sillage")
+def plot_cp_chordwise(ax, cp: ChordwiseDistribution | None) -> None:
+    """Cp le long de la corde d'un corps élancé, extrados et intrados (axe vertical inversé).
+
+    Convention aérodynamique : les Cp négatifs (aspiration) sont vers le haut ; l'aire entre les
+    deux courbes est proportionnelle à la portance due à la pression.
+    """
+    ax.set_title("Pression pariétale Cp(x/c)")
+    if cp is None:
+        ax.text(0.5, 0.5, "Contour indisponible", ha="center", va="center", color=MUTED, transform=ax.transAxes)
+        return
+    # Deux séries (couleurs fixes de la charte) et une légende.
+    ax.plot(cp.x_upper, cp.cp_upper, color=SERIES[0], label="extrados")
+    ax.plot(cp.x_lower, cp.cp_lower, color=SERIES[1], label="intrados")
+    # Référence Cp = 0 (pression de l'écoulement amont).
+    ax.axhline(0.0, color=AXIS_COLOR, linewidth=0.8)
+    # Axe inversé : aspiration vers le haut.
+    ax.invert_yaxis()
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel("x / c (depuis le bord d'attaque)")
+    ax.set_ylabel("Cp (axe inversé)")
+    ax.legend(loc="best")
+
+
+def wake_origin(solver: NavierStokesSolver) -> str:
+    """Origine des stations de sillage : arrière d'un corps élancé, centre d'un corps non profilé."""
+    return "rear" if solver.obstacles and chord_line(solver.obstacles[0]) is not None else "center"
+
+
+def plot_wake_profiles(ax, profiles: Sequence[WakeProfile], eta_max: float = 3.0, origin: str = "center") -> None:
+    """Profils ``u(y)/U∞`` aux stations du sillage (une couleur fixe par station, légende).
+
+    ``origin`` rappelle dans le titre d'où sont mesurées les stations (``'center'`` ou ``'rear'``).
+    """
+    ax.set_title("Profils de sillage" + (" (x depuis l'arrière)" if origin == "rear" else ""))
     for k, profile in enumerate(profiles):
         # Couleur catégorielle attribuée dans l'ordre fixe (station k -> couleur k).
         ax.plot(profile.u, profile.eta, color=SERIES[k % len(SERIES)], label=f"x/L = {profile.station:g}")
@@ -473,12 +533,15 @@ def plot_dashboard(
     # Synthèse des efforts et spectre (si instationnaire).
     summary = history.summary()
     spectrum = history.spectrum() if summary.unsteady else None
-    # Cp pariétal (seulement si l'obstacle a un contour connu).
+    # Cp pariétal (seulement si l'obstacle a un contour connu) ; le long de la corde pour un corps élancé.
     obstacle_has_outline = bool(solver.obstacles) and solver.obstacles[0].outline() is not None
     cp = surface_pressure(solver, fields=mean_fields) if obstacle_has_outline else None
-    # Profils de sillage et longueur de recirculation (champ moyen si disponible).
-    profiles = wake_profiles(solver, tuple(stations), fields=mean_fields) if solver.obstacles else []
-    recirculation = recirculation_length(solver, fields=mean_fields) if solver.obstacles else None
+    chord = chord_line(solver.obstacles[0]) if solver.obstacles else None
+    cp_chord = chordwise_pressure(cp, *chord) if cp is not None and chord is not None else None
+    # Profils de sillage (depuis l'arrière d'un corps élancé) et longueur de recirculation (corps non
+    # profilé seulement : sur un corps incliné, l'axe horizontal ne suit pas le sillage).
+    profiles = wake_profiles(solver, tuple(stations), fields=mean_fields, origin=wake_origin(solver)) if solver.obstacles else []
+    recirculation = recirculation_length(solver, fields=mean_fields) if solver.obstacles and chord is None else None
     # Cadrage de la carte.
     view = view or default_view(solver)
     # Toute la figure est construite avec la charte graphique.
@@ -512,8 +575,11 @@ def plot_dashboard(
         # Panneaux secondaires.
         plot_force_history(ax_cd, ax_cl, history, summary)
         plot_spectrum(ax_spectrum, spectrum, history.reference_length, history.reference_velocity)
-        plot_cp(ax_cp, cp)
-        plot_wake_profiles(ax_wake, profiles)
+        if cp_chord is not None:
+            plot_cp_chordwise(ax_cp, cp_chord)
+        else:
+            plot_cp(ax_cp, cp)
+        plot_wake_profiles(ax_wake, profiles, origin=wake_origin(solver))
         plot_indicators(ax_info, dashboard_indicators(solver, summary, recirculation))
         # Titre général aligné à gauche.
         fig.suptitle(
@@ -529,12 +595,17 @@ def plot_dashboard(
 
 
 # ========================================================================= animation
+#: Grandeurs animables et titres des animations correspondantes.
+ANIMATED_QUANTITIES = {"vorticity": "Vorticité", "speed": "Vitesse", "pressure": "Pression (Cp)"}
+
+
 class FrameRecorder:
-    """Moniteur : mémorise la vorticité (ou la norme de la vitesse) tous les ``every`` pas.
+    """Moniteur : mémorise la vorticité, la norme de la vitesse ou Cp tous les ``every`` pas.
 
     Les images sont stockées en simple précision (float32) ; ~0.3 Mo par image sur une
     grille 400 x 200. ``t_start`` évite d'enregistrer le régime transitoire. :func:`animate`
-    les assemble ensuite en vidéo.
+    les assemble ensuite en vidéo. :meth:`record` ajoute l'image d'un état quelconque (par
+    exemple un instantané conservé pendant le calcul), ce qui permet d'animer après coup.
     """
 
     def __init__(
@@ -546,16 +617,20 @@ class FrameRecorder:
         t_start: float = 0.0,
         attach: bool = True,
     ) -> None:
-        # Deux grandeurs disponibles.
-        if quantity not in ("vorticity", "speed"):
-            raise ValueError("quantity doit valoir 'vorticity' ou 'speed'.")
+        # Trois grandeurs disponibles.
+        if quantity not in ANIMATED_QUANTITIES:
+            raise ValueError("quantity doit valoir 'vorticity', 'speed' ou 'pressure'.")
         self.quantity = quantity
         # Instant à partir duquel les images sont enregistrées.
         self.t_start = float(t_start)
         # Éléments nécessaires au rendu sans le solveur.
         self.grid, self.solid, self.obstacles = solver.grid, solver.solid, list(solver.obstacles)
-        # Échelle d'adimensionnement (U/L pour la vorticité, U pour la vitesse).
-        self.scale = solver.U_ref / solver.L_ref if quantity == "vorticity" else solver.U_ref
+        # Échelle d'adimensionnement : U/L (vorticité), U (vitesse), ½ ρ U² (pression).
+        self.scale = {
+            "vorticity": solver.U_ref / solver.L_ref,
+            "speed": solver.U_ref,
+            "pressure": 0.5 * solver.rho * solver.U_ref**2,
+        }[quantity]
         # Instants et images enregistrés.
         self.times: list[float] = []
         self.frames: list[np.ndarray] = []
@@ -568,20 +643,27 @@ class FrameRecorder:
         return len(self.frames)
 
     def __call__(self, solver: NavierStokesSolver) -> None:
-        st = solver.state
+        # Image de l'état courant du solveur.
+        self.record(solver.state, solver)
+
+    def record(self, state: FlowState, solver: NavierStokesSolver) -> None:
+        """Ajoute l'image de ``state`` (état courant ou instantané enregistré, même grille)."""
         # Régime transitoire : rien à enregistrer.
-        if st.t < self.t_start:
+        if state.t < self.t_start:
             return
         if self.quantity == "vorticity":
             # Vorticité aux coins, adimensionnée.
-            data = vorticity_nodes(st.u, st.v, self.grid, self.solid) / self.scale
-        else:
+            data = vorticity_nodes(state.u, state.v, self.grid, self.solid) / self.scale
+        elif self.quantity == "speed":
             # Norme de la vitesse aux centres, adimensionnée.
-            uc, vc = cell_centered_velocity(st.u, st.v)
+            uc, vc = cell_centered_velocity(state.u, state.v)
             data = np.hypot(uc, vc) / self.scale
+        else:
+            # Coefficient de pression, référence choisie comme pour Cp pariétal (entrée ou sortie).
+            data = (state.p - reference_pressure(solver, pressure=state.p)) / self.scale
         # Stockage en float32 (moitié de la mémoire d'un float64).
-        self.frames.append(data.astype(np.float32))
-        self.times.append(float(st.t))
+        self.frames.append(np.asarray(data, dtype=np.float32))
+        self.times.append(float(state.t))
 
 
 def _render_frames(
@@ -602,7 +684,8 @@ def _render_frames(
     # sur les dernières images (régime établi).
     if vmax is None:
         tail = np.stack(recorder.frames[-min(5, len(recorder)):])
-        vmax = symmetric_limit(tail) if recorder.quantity == "vorticity" else float(np.nanmax(tail))
+        # Grandeurs signées (vorticité, Cp) : borne symétrique ; norme de la vitesse : maximum.
+        vmax = float(np.nanmax(tail)) if recorder.quantity == "speed" else symmetric_limit(tail)
     with rc_context(STYLE):
         # layout="constrained" : marges ajustées automatiquement (titre, barre de couleurs).
         fig = Figure(figsize=(width, height), dpi=dpi, layout="constrained")
@@ -617,12 +700,16 @@ def _render_frames(
         heading = ax.set_title("")
         # Masque des nœuds solides (coins pour la vorticité, cellules pour la vitesse).
         hidden = corner_solid(recorder.solid) if recorder.quantity == "vorticity" else recorder.solid
-        for data, t in zip(recorder.frames, recorder.times):
+        for k, (data, t) in enumerate(zip(recorder.frames, recorder.times)):
             # Nouvelle image (valeur neutre dans le solide) ; .T : convention (y, x) d'imshow.
             image.set_data(np.where(hidden, 0.0, data).T)
             heading.set_text(f"{title} : t = {t:.2f}")
             # Rendu, puis lecture des pixels RGBA ; [..., :3] ne garde que R, G, B.
             canvas.draw()
+            # Mise en page calculée à la première image puis figée (moteur « none ») : sinon le
+            # moteur « constrained » recalculerait toutes les marges à chaque image (~10 fois plus lent).
+            if k == 0:
+                fig.set_layout_engine("none")
             rgb = np.asarray(canvas.buffer_rgba())[..., :3]
             # H.264 exige des dimensions paires : on complète d'une ligne/colonne si besoin.
             yield np.pad(rgb, ((0, rgb.shape[0] % 2), (0, rgb.shape[1] % 2), (0, 0)), mode="edge")
@@ -688,7 +775,7 @@ def animate(
         raise ValueError("Aucune image enregistree : attacher le FrameRecorder avant solver.run().")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Générateur d'images (produites une à une : mémoire maîtrisée).
-    heading = title or ("Vorticité" if recorder.quantity == "vorticity" else "Vitesse")
+    heading = title or ANIMATED_QUANTITIES[recorder.quantity]
     frames = _render_frames(recorder, vmax=vmax, view=view, dpi=dpi, title=heading)
     # Choix du format selon l'extension (.lower() : insensible à la casse).
     suffix = path.suffix.lower()
@@ -752,6 +839,8 @@ def report_figure(
     summary = history.summary()
     spectrum = history.spectrum() if summary.unsteady else None
     L, U = history.reference_length, history.reference_velocity
+    # Corps élancé (profil, plaque) : Cp le long de la corde, sillage mesuré depuis l'arrière.
+    chord = chord_line(solver.obstacles[0]) if solver is not None and solver.obstacles else None
     # Grille de sous-graphiques : carte sur toute la largeur, puis 3 lignes de 2 graphiques.
     fig = make_subplots(
         rows=4,
@@ -765,7 +854,7 @@ def report_figure(
             "Traînée Cd(t)",
             "Portance Cl(t)",
             "Spectre de Cl",
-            "Pression pariétale Cp(θ)",
+            "Pression pariétale Cp(x/c)" if chord is not None else "Pression pariétale Cp(θ)",
             "Profils de sillage u / U",
             "Divergence max |∇·u|",
         ),
@@ -817,23 +906,25 @@ def report_figure(
         xmin, xmax, ymin, ymax = default_view(solver)
         fig.update_xaxes(range=[xmin, xmax], constrain="domain", row=1, col=1)
         fig.update_yaxes(range=[ymin, ymax], scaleanchor="x", scaleratio=1, constrain="domain", row=1, col=1)
-    # --- Cd(t) et Cl(t) : une série par graphique (petits multiples)
+    # --- Cd(t) et Cl(t) : une série par graphique (petits multiples), en temps convectif t U / L
+    tau = convective_time(history)
     for col, (values, name, color) in enumerate(((history.cd, "Cd", SERIES[0]), (history.cl, "Cl", SERIES[1])), 1):
         fig.add_trace(
             go.Scatter(
-                x=history.time,
+                x=tau,
                 y=values,
                 mode="lines",
                 line=dict(color=color, width=2),
                 name=name,
                 showlegend=False,
-                hovertemplate=f"t = %{{x:.2f}}<br>{name} = %{{y:.4f}}<extra></extra>",
+                hovertemplate=f"t U/L = %{{x:.2f}}<br>{name} = %{{y:.4f}}<extra></extra>",
             ),
             row=2,
             col=col,
         )
         # Zone du régime analysé (rectangle très léger).
-        fig.add_vrect(x0=summary.t_start, x1=summary.t_end, fillcolor=color, opacity=0.08, line_width=0, row=2, col=col)
+        fig.add_vrect(x0=summary.t_start * U / L, x1=summary.t_end * U / L, fillcolor=color, opacity=0.08, line_width=0,
+                      row=2, col=col)
         fig.update_xaxes(title_text="t U / L", row=2, col=col)
         # Cadrage vertical sans le pic du démarrage impulsif (portance : axe symétrique).
         fig.update_yaxes(range=list(_focus_limits(history.time, values, symmetric=name == "Cl")), row=2, col=col)
@@ -861,20 +952,37 @@ def report_figure(
             col=1,
         )
         fig.update_xaxes(title_text="St = f L / U", row=3, col=1)
-    # --- Cp(θ) et sillage (nécessitent le solveur)
+    # --- Cp et sillage (nécessitent le solveur)
     if solver is not None and solver.obstacles:
         if solver.obstacles[0].outline() is not None:
             cp = surface_pressure(solver, fields=mean_fields)
-            fig.add_trace(
-                go.Scatter(
-                    x=cp.theta, y=cp.cp, mode="lines", line=dict(color=SERIES[0], width=2), showlegend=False,
-                    hovertemplate="θ = %{x:.0f}°<br>Cp = %{y:.3f}<extra></extra>",
-                ),
-                row=3,
-                col=2,
-            )
-            fig.update_xaxes(title_text="θ (° depuis l'amont)", tickvals=[0, 90, 180, 270, 360], row=3, col=2)
-        for k, profile in enumerate(wake_profiles(solver, tuple(stations), fields=mean_fields)):
+            if chord is not None:
+                # Corps élancé : extrados et intrados en fonction de x/c, axe vertical inversé.
+                cpc = chordwise_pressure(cp, *chord)
+                for x, values, side, color in ((cpc.x_upper, cpc.cp_upper, "extrados", SERIES[0]),
+                                               (cpc.x_lower, cpc.cp_lower, "intrados", SERIES[1])):
+                    # legend="legend2" : seconde légende, placée dans le graphique de Cp (voir plus bas).
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x, y=values, mode="lines", line=dict(color=color, width=2), name=side, legend="legend2",
+                            hovertemplate="x/c = %{x:.3f}<br>Cp = %{y:.3f}<extra>" + side + "</extra>",
+                        ),
+                        row=3,
+                        col=2,
+                    )
+                fig.update_xaxes(title_text="x / c", range=[0.0, 1.0], row=3, col=2)
+                fig.update_yaxes(title_text="Cp (axe inversé)", autorange="reversed", row=3, col=2)
+            else:
+                fig.add_trace(
+                    go.Scatter(
+                        x=cp.theta, y=cp.cp, mode="lines", line=dict(color=SERIES[0], width=2), showlegend=False,
+                        hovertemplate="θ = %{x:.0f}°<br>Cp = %{y:.3f}<extra></extra>",
+                    ),
+                    row=3,
+                    col=2,
+                )
+                fig.update_xaxes(title_text="θ (° depuis l'amont)", tickvals=[0, 90, 180, 270, 360], row=3, col=2)
+        for k, profile in enumerate(wake_profiles(solver, tuple(stations), fields=mean_fields, origin=wake_origin(solver))):
             fig.add_trace(
                 go.Scatter(
                     x=profile.u, y=profile.eta, mode="lines", line=dict(color=SERIES[k % len(SERIES)], width=2),
@@ -890,9 +998,9 @@ def report_figure(
         diag = solver.diagnostics.as_arrays()
         fig.add_trace(
             go.Scatter(
-                x=diag["time"], y=np.maximum(diag["divergence_max"], 1e-20), mode="lines",
+                x=diag["time"] * U / L, y=np.maximum(diag["divergence_max"], 1e-20), mode="lines",
                 line=dict(color=SERIES[0], width=2), showlegend=False,
-                hovertemplate="t = %{x:.2f}<br>max|div u| = %{y:.2e}<extra></extra>",
+                hovertemplate="t U/L = %{x:.2f}<br>max|div u| = %{y:.2e}<extra></extra>",
             ),
             row=4,
             col=2,
@@ -904,6 +1012,14 @@ def report_figure(
     # get_subplot(4, 1) donne ses axes, dont le « domain » est la position dans la page (0..1).
     wake_axes = fig.get_subplot(4, 1)
     legend_x, legend_y = wake_axes.xaxis.domain[0] + 0.01, wake_axes.yaxis.domain[1] - 0.005
+    # Seconde légende (extrados / intrados) dans le coin haut-droit du graphique de Cp.
+    cp_axes = fig.get_subplot(3, 2)
+    fig.update_layout(
+        legend2=dict(
+            x=cp_axes.xaxis.domain[1] - 0.01, y=cp_axes.yaxis.domain[1] - 0.005, xanchor="right", yanchor="top",
+            bgcolor="rgba(252,252,251,0.85)", font=dict(color=INK_SECONDARY),
+        )
+    )
     fig.update_layout(
         height=1500,
         paper_bgcolor=SURFACE,

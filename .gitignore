@@ -4,3 +4,8 @@ __pycache__/
 .pytest_cache/
 outputs/*
 !outputs/.gitkeep
+
+# Configuration locale de Claude Code (chemins propres à la machine)
+.claude/
+# Secrets éventuels de l'application Streamlit (la configuration .streamlit/config.toml est suivie)
+.streamlit/secrets.toml

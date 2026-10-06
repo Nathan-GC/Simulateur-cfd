@@ -10,6 +10,8 @@ from cfd2d.analytics import (
     FieldAverager,
     ForceHistory,
     ForceMonitor,
+    chord_line,
+    chordwise_pressure,
     compute_fields,
     crossing_frequency,
     divergence_report,
@@ -244,6 +246,36 @@ def test_surface_pressure_follows_the_contour():
     # Le premier quart du parcours est sur le dessus du cylindre (y > 3).
     assert dist.y[dist.theta.size // 4] > 3.0  # le parcours longe d'abord le dessus
     np.testing.assert_allclose(dist.cp, np.cos(np.radians(dist.theta)), atol=0.05)
+
+
+def test_chord_line_only_for_slender_bodies():
+    # Corps non profilés : pas de corde.
+    assert chord_line(Cylinder(0.0, 0.0, 1.0)) is None
+    assert chord_line(Rectangle.square(0.0, 0.0, 1.0)) is None
+    # Plaque à 20° d'incidence (rotation horaire) : bord d'attaque en amont et au-dessus du bord de fuite.
+    le, te = chord_line(Rectangle(0.0, 0.0, 2.0, 0.2, angle_deg=-20.0))
+    assert le[0] < te[0] and le[1] > te[1]
+    # Les deux extrémités sont distantes de la longueur de la plaque.
+    assert np.hypot(te[0] - le[0], te[1] - le[1]) == pytest.approx(2.0)
+
+
+def test_chordwise_pressure_separates_upper_and_lower_surfaces():
+    # Profil NACA 0012 à 5° d'incidence (le champ n'est pas calculé : pression imposée).
+    s = NavierStokesSolver(presets.naca_airfoil(code="0012", alpha_deg=5.0, cells_per_chord=24, length=4.0,
+                                                height=2.0, x_le=1.0))
+    ob = s.obstacles[0]
+    # Pression égale à l'ordonnée relative au bord d'attaque (½ρU² = 0.5, d'où Cp = y - y_le).
+    _, Y = s.grid.cell_centers()
+    s.state.p[:] = 0.5 * (Y - 1.0)
+    chord = chord_line(ob)
+    assert chord == (ob.leading_edge, ob.trailing_edge)
+    cp = chordwise_pressure(surface_pressure(s, p_ref=0.0, n=240), *chord)
+    # Sur chaque face : abscisses réduites croissantes, du bord d'attaque au bord de fuite.
+    for x in (cp.x_upper, cp.x_lower):
+        assert np.all(np.diff(x) >= 0.0)
+        assert x[0] == pytest.approx(0.0, abs=0.03) and x[-1] == pytest.approx(1.0, abs=0.03)
+    # L'extrados est au-dessus de la corde : sa « pression » (son ordonnée) est la plus grande.
+    assert cp.cp_upper.mean() > cp.cp_lower.mean()
 
 
 def test_wake_profile_metrics_on_gaussian_wake(tmp_path):

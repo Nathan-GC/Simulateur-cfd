@@ -4,7 +4,7 @@ Ce tutoriel se suit dans l'ordre, en trois parties :
 
 | Partie | Objectif | Durée |
 |---|---|---|
-| **A. Lancer** | installer, vérifier, faire tourner les exemples | 20 min |
+| **A. Lancer** | installer, vérifier, faire tourner les exemples et l'application web | 30 min |
 | **B. Paramétrer** | changer le Reynolds, l'obstacle, les parois, la résolution... | 30 min |
 | **C. Comprendre** | lire le code dans le bon ordre, avec la théorie à chaque étape | quelques heures |
 
@@ -49,7 +49,7 @@ py -3.12 -m venv .venv
 2. met à jour l'installateur de paquets `pip` ;
 3. installe les dépendances listées dans [requirements.txt](requirements.txt) : numpy (tableaux),
    scipy (matrices creuses, FFT), matplotlib (figures), plotly (rapport interactif),
-   ffmpeg-python (vidéos), pytest (tests) ;
+   ffmpeg-python (vidéos), pytest (tests), streamlit (application web) ;
 4. installe le paquet `cfd2d` lui-même en mode « éditable » (`-e`) : toute modification des
    fichiers de `src/cfd2d/` est prise en compte immédiatement, sans réinstaller.
 
@@ -79,10 +79,11 @@ environnement par l'éditeur (autocomplétion, débogueur, bouton ▶).
 .venv\Scripts\python -m pytest
 ```
 
-Résultat attendu, en une minute environ : `95 passed`. Ces tests vérifient le code sur des cas
-dont on connaît la réponse exacte : parabole de Poiseuille dans un canal, cavité entraînée
-comparée aux données de Ghia et al. (1982), convergence d'ordre 2 de l'équation de Poisson,
-divergence nulle à 10⁻¹⁵ près...
+Résultat attendu, en une minute et demie environ : `121 passed`. Ces tests vérifient le code
+sur des cas dont on connaît la réponse exacte : parabole de Poiseuille dans un canal, cavité
+entraînée comparée aux données de Ghia et al. (1982), convergence d'ordre 2 de l'équation de
+Poisson, divergence nulle à 10⁻¹⁵ près... Les fichiers `tests/test_webapp.py` et
+`tests/test_app.py` vérifient l'application web (petits calculs lancés sans navigateur).
 
 Pour n'exécuter qu'un fichier, avec le nom de chaque test : `.venv\Scripts\python -m pytest tests/test_grid.py -v`.
 
@@ -147,6 +148,40 @@ Strouhal St, pression pariétale, sillage, divergence) et tout est écrit dans
 Pour une animation dans ParaView, enregistrer une série pendant le calcul avec
 `cfd2d.io.VTKSeriesWriter(solver, "outputs/vtk", every=200)` puis ouvrir le fichier
 `flow.vtk.series` produit.
+
+### A.8 L'application web : tout régler à la souris
+
+```powershell
+.venv\Scripts\python -m streamlit run app.py
+```
+
+Le navigateur s'ouvre sur http://localhost:8501 (sinon, ouvrir l'adresse affichée dans le
+terminal). Pour arrêter l'application : `Ctrl+C` dans le terminal. Le thème clair ou sombre se
+choisit dans le menu ⋮ en haut à droite (*Settings*).
+
+1. **Onglet 📚 Théorie & Documentation** : la théorie illustrée (à lire avant la partie C), ce
+   tutoriel et le README mis en forme, des exercices corrigés et le code source commenté.
+2. **Onglet 🚀 Simulation Interactive**, colonne des réglages : choisir le cas (*Obstacle*,
+   *Cavité*, *Canal*), éventuellement un **scénario guidé** (réglages chargés étape par étape,
+   avec ce qu'il faut observer et des questions corrigées), puis ajuster les réglages ; la
+   plupart des sections ont une fenêtre *Théorie* et une fenêtre *Code*. Le **récapitulatif avant calcul** affiche le
+   Reynolds, le blocage, l'épaisseur de l'obstacle en mailles, la durée estimée et le régime
+   attendu ; un conseil apparaît si un réglage est risqué.
+3. **Lancer la simulation** : le calcul tourne en arrière-plan avec un aperçu en direct. On peut
+   lire la théorie pendant ce temps, ou arrêter le calcul : ce qui est déjà calculé est analysé.
+4. **📊 Résultats** : indicateurs, lecture commentée (signification des valeurs, comparaison à
+   la littérature), puis les sous-onglets *Champs*, *Efforts*, *Paroi & sillage*, *Animation*,
+   *Méthode* (un pas de projection décomposé sur ton calcul), *Diagnostics* et *Exports* (CSV,
+   NPZ, VTK, figures). *Prolonger le calcul* poursuit un calcul trop court.
+5. **🗂️ Historique** : chaque calcul est enregistré dans `outputs/app_runs/`. Cocher des lignes
+   pour réafficher un calcul, recharger ses réglages ou superposer les courbes de plusieurs
+   calculs.
+6. **📈 Études** : dans *Étude paramétrique*, choisir un paramètre et ses valeurs (par exemple
+   Re = 60, 80, 100, 150) ; les calculs s'enchaînent et St(Re), Cd(Re)... s'affichent. Une étude
+   en résolution donne l'extrapolation de Richardson (valeur à maille nulle).
+
+L'expander **Script Python équivalent** donne le script qui refait le même calcul hors de
+l'application : c'est le pont entre les boutons et la partie B.
 
 ---
 
@@ -609,7 +644,12 @@ docstring en tête donne le plan). **Test associé :**
 1. [examples/lid_driven_cavity.py](examples/lid_driven_cavity.py) : un calcul et sa validation ;
 2. [examples/mon_ecoulement.py](examples/mon_ecoulement.py) : la configuration explicite ;
 3. [examples/cylinder_re100.py](examples/cylinder_re100.py) : toute la chaîne (moniteurs,
-   analyse, figures, exports).
+   analyse, figures, exports) ;
+4. [app.py](app.py) et le dossier `webapp/` : l'application web, qui fait la même chose avec
+   des boutons. Elle ne contient aucun calcul : [webapp/params.py](webapp/params.py) assemble la
+   `SimulationConfig`, [webapp/runner.py](webapp/runner.py) exécute le solveur dans un fil
+   d'arrière-plan avec ses moniteurs, [webapp/analysis.py](webapp/analysis.py) appelle
+   `analytics`, et [webapp/results.py](webapp/results.py) affiche le tout.
 
 ### C.11 Outils pour explorer le code
 

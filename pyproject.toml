@@ -19,5 +19,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# src : paquet cfd2d ; "." : paquet de l'application web (webapp/).
+pythonpath = ["src", "."]
 markers = ["slow: validations physiques longues (désélectionner avec -m 'not slow')"]

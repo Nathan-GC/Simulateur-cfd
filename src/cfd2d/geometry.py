@@ -356,6 +356,35 @@ class Rectangle(_PolygonShape):
         # Centre exact (égal au centre de gravité, mais sans erreur d'arrondi).
         return (self.xc, self.yc)
 
+    @property
+    def aspect_ratio(self) -> float:
+        """Allongement : grande dimension / petite dimension (1 pour un carré)."""
+        return max(self.width, self.height) / min(self.width, self.height)
+
+    def _chord_ends(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Milieux des deux petits côtés, de l'amont vers l'aval : extrémités de la « corde »."""
+        # Direction de la grande dimension (axe de la largeur, tourné de angle_deg, ou axe de la
+        # hauteur s'il est plus long) et demi-longueur correspondante.
+        a = np.radians(self.angle_deg)
+        if self.width >= self.height:
+            direction, half = np.array([np.cos(a), np.sin(a)]), 0.5 * self.width
+        else:
+            direction, half = np.array([-np.sin(a), np.cos(a)]), 0.5 * self.height
+        # Les deux extrémités, rangées par abscisse croissante (amont d'abord pour un écoulement selon +x).
+        center = np.array([self.xc, self.yc])
+        ends = sorted((center - half * direction, center + half * direction), key=lambda p: p[0])
+        return (float(ends[0][0]), float(ends[0][1])), (float(ends[1][0]), float(ends[1][1]))
+
+    @property
+    def leading_edge(self) -> tuple[float, float]:
+        """Bord d'attaque d'une plaque : milieu du petit côté amont."""
+        return self._chord_ends()[0]
+
+    @property
+    def trailing_edge(self) -> tuple[float, float]:
+        """Bord de fuite d'une plaque : milieu du petit côté aval."""
+        return self._chord_ends()[1]
+
 
 def naca4_coordinates(code: str, n: int = 200, closed_te: bool = True) -> np.ndarray:
     """Contour (sens trigonométrique) d'un profil NACA 4 chiffres de corde unité.

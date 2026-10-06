@@ -378,11 +378,12 @@ class NavierStokesSolver:
         return lambda x, y: west.profile_values(y, self.grid.Ly, U, self.state.t)
 
     # ============================================================== pas de temps
-    def stable_dt(self) -> float:
-        """Pas de temps maximal stable pour le champ courant.
+    def stability_rates(self) -> tuple[float, float]:
+        """Taux ``(advection, diffusion)`` du critère de stabilité, en 1/s, pour le champ courant.
 
-        Critère combiné advection-diffusion ``1/Δt = C_adv/CFL + C_diff/Fo`` avec
-        ``C_adv = |u|max/Δx + |v|max/Δy`` et ``C_diff = ν (1/Δx² + 1/Δy²)``.
+        ``advection = (|u|max/Δx + |v|max/Δy) / CFL`` et ``diffusion = ν (1/Δx² + 1/Δy²) / Fo`` ;
+        :meth:`stable_dt` vaut l'inverse de leur somme. Leur rapport indique quelle contrainte
+        limite le pas de temps.
         """
         g, st, tc = self.grid, self.state, self.config.time
         # Vitesses maximales (np.abs(...).max()) : lignes physiques, avec le plancher des vitesses
@@ -395,14 +396,23 @@ class NavierStokesSolver:
         # Courant visé et Fourier maximal (valeurs utilisateur ou valeurs sûres du schéma).
         cfl = tc.cfl if tc.cfl is not None else DEFAULT_CFL[tc.scheme]
         fourier = tc.fourier if tc.fourier is not None else _SAFETY * FOURIER_LIMIT[tc.scheme]
-        # Taux imposé par l'advection : (|u|/dx + |v|/dy) / CFL.
-        advective_rate = (umax / g.dx + vmax / g.dy) / cfl
-        # Taux imposé par la diffusion : nu (1/dx² + 1/dy²) / Fo.
-        diffusive_rate = self.nu * (1.0 / g.dx**2 + 1.0 / g.dy**2) / fourier
+        # Taux imposé par l'advection : (|u|/dx + |v|/dy) / CFL ; par la diffusion : nu (1/dx² + 1/dy²) / Fo.
+        return (umax / g.dx + vmax / g.dy) / cfl, self.nu * (1.0 / g.dx**2 + 1.0 / g.dy**2) / fourier
+
+    def stable_dt(self) -> float:
+        """Pas de temps maximal stable pour le champ courant.
+
+        Critère combiné advection-diffusion ``1/Δt = C_adv/CFL + C_diff/Fo`` avec
+        ``C_adv = |u|max/Δx + |v|max/Δy`` et ``C_diff = ν (1/Δx² + 1/Δy²)``.
+        """
+        tc = self.config.time
         # Les deux contraintes se cumulent (critère combiné, plus sûr que le minimum).
-        rate = advective_rate + diffusive_rate
-        dt = 1.0 / rate
+        advective_rate, diffusive_rate = self.stability_rates()
+        dt = 1.0 / (advective_rate + diffusive_rate)
         # Euler explicite avec un schéma non décentré : stable seulement si dt < 2 nu / |u|².
+        st = self.state
+        umax = max(float(np.abs(st.u[:, 1:-1]).max()), self._u_bc_max)
+        vmax = max(float(np.abs(st.v[1:-1, :]).max()), self._v_bc_max)
         if tc.scheme == "euler" and self.config.numerics.advection != "upwind" and umax + vmax > 0:
             dt = min(dt, _SAFETY * 2.0 * self.nu / (umax**2 + vmax**2))  # Euler + schéma centré
         return dt
@@ -597,6 +607,39 @@ class NavierStokesSolver:
             raise ValueError("every doit être >= 1.")
         # Ajout du couple (fréquence, fonction).
         self._callbacks.append((int(every), callback))
+
+    def remove_callback(self, callback: Callback) -> None:
+        """Retire un rappel enregistré par :meth:`add_callback` (sans effet s'il est absent)."""
+        # On garde tous les couples dont la fonction n'est pas celle à retirer (« is » : même objet).
+        self._callbacks = [(every, cb) for every, cb in self._callbacks if cb is not callback]
+
+    # ================================================================ pédagogie
+    def projection_anatomy(self, dt: float | None = None) -> dict[str, np.ndarray | float]:
+        """Décompose un pas de projection à partir de l'état courant, sans modifier celui-ci.
+
+        Prédiction d'Euler ``u* = uⁿ + Δt H(uⁿ)`` (conditions aux limites et obstacles
+        compris), divergence de ``u*``, résolution de l'équation de Poisson, correction, puis
+        divergence du champ corrigé. Renvoie ``dt``, ``div_star`` et ``div_after`` (formes
+        ``(Nx, Ny)``), ``pressure`` (solution de Poisson) et le champ corrigé ``u``, ``v``.
+        """
+        st = self.state
+        # Pas de temps : celui que le solveur choisirait pour le pas suivant.
+        dt = self.next_dt() if dt is None else float(dt)
+        # Copies de l'état (_rhs met à jour les cellules fantômes des tableaux qu'il reçoit).
+        u0, v0 = st.u.copy(), st.v.copy()
+        # Tendance explicite H = -∇·(u⊗u) + ν∇²u, puis prédiction sans pression.
+        Fu, Fv = self._rhs(u0, v0)
+        u, v = u0 + dt * Fu, v0 + dt * Fv
+        # Conditions aux limites à t + dt et faces des obstacles, comme dans un vrai pas.
+        self.boundary.apply_normal(u, v, st.t + dt)
+        self.boundary.extrapolate_outlets(u, v)
+        self._zero_solid_faces(u, v)
+        # Divergence du champ prédit : c'est elle que la pression doit annuler.
+        div_star = divergence(u, v, self.grid)
+        # Poisson et correction (u, v modifiés en place), cellules fantômes cohérentes.
+        p, _ = self._project(u, v, dt)
+        self.boundary.apply_ghosts(u, v)
+        return {"dt": dt, "div_star": div_star, "pressure": p, "div_after": divergence(u, v, self.grid), "u": u, "v": v}
 
     # =============================================================== diagnostics
     def _record(self, dt: float, info: SolveInfo) -> None:

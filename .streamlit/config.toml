@@ -1,0 +1,20 @@
+# Configuration de l'application web (streamlit run app.py).
+
+# Deux thèmes aux couleurs de la charte graphique du paquet (cfd2d.visualization) : le thème
+# suit le réglage du système, ou le choix fait dans le menu ⋮ > Settings de la page. Les
+# graphiques Plotly s'adaptent au thème actif ; les figures matplotlib restent sur fond clair.
+[theme.light]
+primaryColor = "#2a78d6"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f0efec"
+textColor = "#0b0b0b"
+
+[theme.dark]
+primaryColor = "#3987e5"
+backgroundColor = "#16171a"
+secondaryBackgroundColor = "#232428"
+textColor = "#ecebe7"
+
+[browser]
+# Pas d'envoi de statistiques d'utilisation à Streamlit.
+gatherUsageStats = false

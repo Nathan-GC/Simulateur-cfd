@@ -5,7 +5,8 @@ Solveur CFD 2D paramétrable : différences finies sur **grille MAC décalée**,
 
 **Première visite ?** Suivre le [tutoriel pas à pas](TUTORIEL.md) : installation, lancement,
 modification des paramètres, puis lecture guidée de la théorie et du code. Pour paramétrer
-un écoulement sans écrire de code, partir du gabarit [examples/mon_ecoulement.py](examples/mon_ecoulement.py).
+un écoulement sans écrire de code : l'[application web](#application-web) (réglages à la
+souris) ou le gabarit [examples/mon_ecoulement.py](examples/mon_ecoulement.py).
 
 ## Installation
 
@@ -15,6 +16,34 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install -e .
 ```
+
+## Application web
+
+```bash
+python -m streamlit run app.py
+```
+
+L'application s'ouvre dans le navigateur (http://localhost:8501), en thème clair ou sombre
+(menu ⋮ > *Settings*), et s'utilise aussi sur téléphone. Elle n'implémente aucun calcul : elle
+assemble une `SimulationConfig`, exécute le solveur et présente les résultats du paquet.
+
+- **📚 Théorie & Documentation** : théorie illustrée (équations, grille MAC, projection de
+  Chorin, obstacles en marches d'escalier, calculateur de stabilité, régimes de sillage et loi
+  St(Re)), ce README et le tutoriel, exercices corrigés, code source commenté.
+- **🚀 Simulation Interactive** : trois cas (obstacle en soufflerie, cavité entraînée, canal),
+  huit scénarios guidés (régimes de sillage, diffusion numérique, stabilité, blocage,
+  convergence en maillage, cavité de Re = 100 à 1000, canal, profil d'aile), récapitulatif
+  avant calcul (blocage, épaisseur de l'obstacle en mailles, durée estimée, régime attendu) et
+  script Python équivalent aux réglages.
+- **Résultats** : indicateurs adaptés à l'obstacle (corps non profilé : Cd, Cl rms, St et sa
+  fiabilité, Lr ; profil : Cl, Cd, L/D, Cm), lecture commentée (comparaison à la littérature,
+  correction de blocage), champs interactifs, efforts et spectre, Cp et sillage, animations à
+  la demande, anatomie d'un pas de projection, diagnostics et exports.
+- **Historique et études** : les calculs tournent en arrière-plan (page utilisable, aperçu en
+  direct, bouton d'arrêt) et sont enregistrés dans `outputs/app_runs/` : réaffichage,
+  rechargement des réglages, superposition des courbes, prolongation. Une étude paramétrique
+  enchaîne une série de calculs (balayage en Re, en résolution...), avec extrapolation de
+  Richardson et indice de convergence (GCI) pour la convergence en maillage.
 
 ## Démarrage rapide
 
@@ -113,7 +142,19 @@ src/cfd2d/
 └── io.py            export .npz / .vtk (ParaView), séries temporelles, points de reprise
 examples/            mon_ecoulement.py (gabarit : tous les paramètres), cylinder_re100.py
                      (exemple complet), lid_driven_cavity.py (validation)
-tests/               tests unitaires et validations physiques (pytest)
+app.py               application web Streamlit (point d'entrée)
+webapp/              code de l'interface :
+├── params.py        réglages → SimulationConfig, diagnostic avant calcul (blocage, épaisseur, coût)
+├── runner.py        calcul dans un fil d'arrière-plan : moniteurs, progression, arrêt, prolongation
+├── analysis.py      post-traitement (appels à cfd2d.analytics) et lecture commentée des résultats
+├── results.py       affichage des résultats (indicateurs, sous-onglets) ; figures.py : graphiques
+├── history.py       historique, comparaison, études paramétriques (Richardson, GCI)
+├── store.py         enregistrement des calculs (outputs/app_runs/), calibration de la durée
+├── scenarios.py     scénarios guidés ; codegen.py : script Python équivalent aux réglages
+├── docs.py          onglet Théorie & Documentation ; preview.py : schéma du domaine, aperçu en direct
+└── common.py        chemins, libellés, mise en forme, charte des figures
+.streamlit/          configuration de l'application (thèmes clair et sombre)
+tests/               tests unitaires et validations physiques (pytest), tests de l'application
 outputs/             résultats
 ```
 
@@ -172,14 +213,14 @@ Un pas de temps :
 ## Validation
 
 ```bash
-pytest                    # suite complète : 95 tests (~45 s)
+pytest                    # suite complète : 121 tests (~1 min 30), application comprise
 python examples/lid_driven_cavity.py 64
 ```
 
 | Cas | Résultat |
 |---|---|
 | Opérateur de Poisson (solution analytique) | convergence d'ordre 2 (Neumann et Dirichlet) |
-| Projection (5 solveurs de pression) | `max|∇·u| < 1e-8 × initial`, pressions identiques |
+| Projection (5 solveurs de pression) | `max\|∇·u\| < 1e-8 × initial`, pressions identiques |
 | Canal de Poiseuille, Re = 10 | profil à 0,4 % près, `dp/dx` à 0,8 % |
 | Cavité entraînée, Re = 100 (Ghia 1982) | écart max 0,005 (u) et 0,009 (v) sur les axes médians |
 | Efforts, Re = 20 stationnaire | contour = bilan de quantité de mouvement à 4 chiffres (Cd = 2,5829) ; Lr/D = 0,93 |

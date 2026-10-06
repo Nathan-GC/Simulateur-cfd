@@ -7,5 +7,8 @@ matplotlib>=3.7
 plotly>=5.15
 ffmpeg-python>=0.2    # nécessite aussi l'exécutable ffmpeg dans le PATH (MP4)
 
+# Application web interactive (app.py : streamlit run app.py)
+streamlit>=1.65    # version testée (onglets avec état, textes alternatifs des images...)
+
 # Tests
 pytest>=7.4

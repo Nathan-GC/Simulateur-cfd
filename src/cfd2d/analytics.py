@@ -46,8 +46,8 @@ from scipy import signal as sps
 # Type d'entrée (choix de la pression de référence).
 from .boundary import Inlet
 
-# Classe de base des obstacles.
-from .geometry import Obstacle
+# Classe de base des obstacles ; profil NACA et rectangle (corps élancés : Cp le long de la corde).
+from .geometry import NACA4, Obstacle, Rectangle
 
 # Grille décalée.
 from .grid import StaggeredGrid
@@ -842,16 +842,20 @@ def strouhal_number(
 
 # ======================================================================= 4. profils
 def reference_pressure(
-    solver: NavierStokesSolver, where: str | float | tuple[float, float] = "auto", fields: FlowFields | None = None
+    solver: NavierStokesSolver,
+    where: str | float | tuple[float, float] = "auto",
+    fields: FlowFields | None = None,
+    pressure: np.ndarray | None = None,
 ) -> float:
     """Pression de référence ``p∞`` pour les coefficients de pression.
 
     ``'inlet'`` : moyenne sur la première colonne de cellules (amont) ; ``'outlet'`` : 0
     (pression imposée en sortie) ; un nombre ; ou un point ``(x, y)``. ``'auto'`` choisit
-    ``'inlet'`` si le côté ouest est une entrée, ``'outlet'`` sinon.
+    ``'inlet'`` si le côté ouest est une entrée, ``'outlet'`` sinon. Le champ utilisé est
+    ``pressure`` s'il est fourni, sinon ``fields.p``, sinon la pression courante du solveur.
     """
-    # Champ de pression : instantané ou moyen.
-    p = solver.state.p if fields is None else fields.p
+    # Champ de pression : fourni, moyen, ou instantané.
+    p = pressure if pressure is not None else (solver.state.p if fields is None else fields.p)
     # Choix automatique.
     if where == "auto":
         where = "inlet" if isinstance(solver.config.boundaries.west, Inlet) else "outlet"
@@ -960,6 +964,87 @@ def surface_pressure(
     # Abscisse curviligne depuis le point de départ.
     s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
     return SurfaceDistribution(pts[:, 0], pts[:, 1], s, theta, cp)
+
+
+def chord_line(obstacle: Obstacle) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Bord d'attaque et bord de fuite d'un corps élancé, ``None`` pour un corps non profilé.
+
+    Corps élancés : profils NACA et rectangles d'allongement au moins 2 (plaques). Pour eux,
+    la pression pariétale se lit le long de la corde (:func:`chordwise_pressure`) plutôt qu'en
+    fonction de l'angle autour du centre, et la recirculation sur l'axe n'a pas de sens.
+    """
+    # Profil : corde définie par sa géométrie.
+    if isinstance(obstacle, NACA4):
+        return obstacle.leading_edge, obstacle.trailing_edge
+    # Plaque : milieux des deux petits côtés (un carré ou un rectangle trapu n'est pas élancé).
+    if isinstance(obstacle, Rectangle) and obstacle.aspect_ratio >= 2.0:
+        return obstacle.leading_edge, obstacle.trailing_edge
+    return None
+
+
+@dataclass
+class ChordwiseDistribution:
+    """Coefficient de pression le long de la corde d'un corps élancé, extrados et intrados.
+
+    ``x_upper`` et ``x_lower`` sont les abscisses réduites ``x/c`` le long de la corde
+    (0 au bord d'attaque, 1 au bord de fuite), croissantes.
+    """
+
+    # Extrados (face supérieure) : abscisses réduites et Cp.
+    x_upper: np.ndarray
+    cp_upper: np.ndarray
+    # Intrados (face inférieure).
+    x_lower: np.ndarray
+    cp_lower: np.ndarray
+
+    def save(self, path: str | Path) -> Path:
+        # Table longue : face (1 = extrados, 0 = intrados), x/c, Cp.
+        return _save_table(
+            path,
+            {
+                "upper": np.concatenate([np.ones(self.x_upper.size), np.zeros(self.x_lower.size)]),
+                "x_c": np.concatenate([self.x_upper, self.x_lower]),
+                "cp": np.concatenate([self.cp_upper, self.cp_lower]),
+            },
+        )
+
+
+def chordwise_pressure(
+    distribution: SurfaceDistribution, leading_edge: tuple[float, float], trailing_edge: tuple[float, float]
+) -> ChordwiseDistribution:
+    """Répartit une distribution pariétale entre extrados et intrados, en fonction de ``x/c``.
+
+    Le contour est coupé en deux arcs au bord d'attaque (``x/c`` minimal) et au bord de
+    fuite (``x/c`` maximal) ; l'extrados est l'arc situé en moyenne au-dessus de la corde.
+    """
+    le, te = np.asarray(leading_edge, dtype=float), np.asarray(trailing_edge, dtype=float)
+    # Vecteur corde et carré de sa longueur.
+    chord = te - le
+    length2 = float(chord @ chord)
+    # Points du contour relatifs au bord d'attaque.
+    rel = np.column_stack([distribution.x, distribution.y]) - le
+    # Abscisse réduite (projection sur la corde) et distance signée à la corde (produit vectoriel :
+    # positive à gauche de la corde orientée de l'amont vers l'aval, c'est-à-dire au-dessus).
+    xi = rel @ chord / length2
+    eta = (chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.sqrt(length2)
+    n = xi.size
+    # Indices du bord d'attaque et du bord de fuite le long du contour (fermé, parcouru en boucle).
+    i_le, i_te = int(np.argmin(xi)), int(np.argmax(xi))
+
+    def arc(start: int, stop: int) -> np.ndarray:
+        # Indices de start à stop inclus en tournant dans le sens du parcours (% n : retour au début).
+        return np.arange(start, start + (stop - start) % n + 1) % n
+
+    first, second = arc(i_le, i_te), arc(i_te, i_le)
+    # L'arc situé en moyenne au-dessus de la corde est l'extrados.
+    upper, lower = (first, second) if eta[first].mean() >= eta[second].mean() else (second, first)
+
+    def sort_by_x(idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # Points de l'arc rangés par x/c croissant (np.argsort donne l'ordre de tri).
+        order = np.argsort(xi[idx], kind="stable")
+        return xi[idx][order], distribution.cp[idx][order]
+
+    return ChordwiseDistribution(*sort_by_x(upper), *sort_by_x(lower))
 
 
 @dataclass

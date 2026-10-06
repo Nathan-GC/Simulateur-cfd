@@ -9,13 +9,18 @@ import pytest
 # Pillow : relecture des images produites.
 from PIL import Image
 
+# Figure matplotlib indépendante de pyplot.
+from matplotlib.figure import Figure
+
 from cfd2d import FieldAverager, ForceMonitor, NavierStokesSolver, presets
+from cfd2d.analytics import ForceHistory
 from cfd2d.visualization import (
     FrameRecorder,
     animate,
     corner_solid,
     interactive_report,
     plot_dashboard,
+    plot_force_history,
     report_figure,
 )
 
@@ -30,6 +35,24 @@ def run():
     recorder = FrameRecorder(s, every=10)
     s.run(t_end=3.0)
     return s, forces.history(), averager.fields(), recorder
+
+
+def test_force_history_uses_convective_time_and_tight_lift_axis():
+    # Historique synthétique : L = 2, U = 4 (t U / L = 2 t) ; portance de signe constant (profil).
+    t = np.linspace(0.0, 10.0, 200)
+    zeros = np.zeros_like(t)
+    history = ForceHistory(
+        time=t, cd=1.0 + 0.0 * t, cl=0.3 + 0.01 * np.sin(t), cd_pressure=zeros, cd_viscous=zeros,
+        cd_convective=zeros, cl_pressure=zeros, cl_viscous=zeros, cl_convective=zeros, cm=zeros,
+        reference_length=2.0, reference_velocity=4.0,
+    )
+    fig = Figure()
+    ax_cd, ax_cl = fig.subplots(2, 1)
+    plot_force_history(ax_cd, ax_cl, history)
+    # Abscisses en temps convectif : la dernière vaut 10 x 4 / 2 = 20.
+    assert ax_cd.lines[0].get_xdata()[-1] == pytest.approx(20.0)
+    # Portance toujours positive : l'axe n'est pas symétrique autour de 0.
+    assert ax_cl.get_ylim()[0] > 0.0
 
 
 def test_corner_solid_marks_only_fully_surrounded_corners():

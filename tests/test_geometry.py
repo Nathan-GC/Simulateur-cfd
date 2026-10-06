@@ -46,6 +46,17 @@ def test_rotated_rectangle_area_and_frontal_height():
     assert Rectangle.square(1.0, 1.0, 0.4).reference_length == pytest.approx(0.4)
 
 
+def test_rectangle_chord_ends_follow_the_long_side():
+    # Plaque horizontale 2 x 0.2 : allongement 10, extrémités aux milieux des petits côtés.
+    plate = Rectangle(1.0, 0.5, 2.0, 0.2)
+    assert plate.aspect_ratio == pytest.approx(10.0)
+    assert plate.leading_edge == pytest.approx((0.0, 0.5)) and plate.trailing_edge == pytest.approx((2.0, 0.5))
+    # Plaque verticale (hauteur > largeur) : la « corde » suit la grande dimension, verticale.
+    tall = Rectangle(0.0, 0.0, 0.2, 2.0)
+    (x0, y0), (x1, y1) = tall.leading_edge, tall.trailing_edge
+    assert x0 == pytest.approx(x1) and abs(y1 - y0) == pytest.approx(2.0)
+
+
 def test_naca_symmetric_profile_geometry():
     # Contour d'un NACA 0012 (symétrique, épaisseur 12 %).
     pts = naca4_coordinates("0012", n=401)

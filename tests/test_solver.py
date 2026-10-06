@@ -139,6 +139,29 @@ def test_callbacks_are_called_at_requested_interval():
     assert calls == [5, 10, 15, 20]
 
 
+def test_stability_rates_give_the_stable_time_step():
+    s = NavierStokesSolver(presets.cylinder_flow(cells_per_diameter=8, length=10.0, height=5.0, x_center=3.0))
+    advective, diffusive = s.stability_rates()
+    # Les deux taux sont positifs et le pas stable (AB2) est l'inverse de leur somme.
+    assert advective > 0.0 and diffusive > 0.0
+    assert s.stable_dt() == pytest.approx(1.0 / (advective + diffusive))
+
+
+def test_projection_anatomy_removes_the_divergence_without_changing_the_state():
+    s = NavierStokesSolver(presets.cylinder_flow(cells_per_diameter=8, length=10.0, height=5.0, x_center=3.0))
+    s.run(max_steps=20)
+    # Copie de l'état avant l'appel.
+    before = s.state.copy()
+    parts = s.projection_anatomy()
+    # Le champ prédit n'est pas à divergence nulle ; la projection la ramène à l'arrondi machine.
+    assert np.abs(parts["div_star"]).max() > 1e-6
+    assert np.abs(parts["div_after"]).max() < 1e-10
+    # L'état du solveur n'a pas bougé (même temps, mêmes tableaux).
+    assert s.state.t == before.t and s.state.step == before.step
+    np.testing.assert_array_equal(s.state.u, before.u)
+    np.testing.assert_array_equal(s.state.p, before.p)
+
+
 def test_ramped_inlet_starts_from_rest():
     # Entrée avec montée en vitesse sur une unité de temps.
     cfg = presets.channel_flow(t_end=1.0)
